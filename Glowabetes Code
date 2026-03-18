@@ -1,0 +1,253 @@
+# Glowabetes
+
+Glowabetes is an IoT project that connects Libre glucose data to a Raspberry Pi RGB LED indicator.
+
+## System Architecture
+
+Libre 3 sensor  
+→ LibreLinkUp  
+→ Docker uploader  
+→ Nightscout (Render + MongoDB Atlas)  
+→ Raspberry Pi  
+→ Common-anode RGB LED
+
+## Features
+
+- Reads real glucose data from Nightscout
+- Controls RGB LED on Raspberry Pi
+- Supports terminal demo override
+- Uses common-anode RGB LED
+- Thresholds:
+  - < 80 → Red
+  - 80–120 → Green
+  - 120–180 → Yellow
+  - > 180 → Red
+
+## Hardware
+
+- Raspberry Pi
+- Adafruit T-Cobbler Plus
+- Breadboard
+- 4-pin common-anode RGB LED
+- 3 resistors (220–330 Ω)
+- Jumper wires
+
+## GPIO Pins
+
+- Red: GPIO17
+- Green: GPIO27
+- Blue: GPIO22
+
+## Notes
+
+This project includes both:
+- real sensor mode through Nightscout
+- manual terminal demo override for classroom demos
+
+
+
+
+__pycache__/
+*.pyc
+.env
+libre.env
+.vscode/
+.DS_Store
+
+import time
+import threading
+import requests
+import RPi.GPIO as GPIO
+
+# ---------- CONFIG ----------
+NIGHTSCOUT_URL = "https://glowabetes.onrender.com/api/v1/entries.json?count=1"
+POLL_SECONDS = 15
+DEMO_SECONDS = 120
+
+# GPIO pins (BCM numbering)
+PIN_R = 17
+PIN_G = 27
+PIN_B = 22
+
+# ---------- GPIO SETUP ----------
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(PIN_R, GPIO.OUT)
+GPIO.setup(PIN_G, GPIO.OUT)
+GPIO.setup(PIN_B, GPIO.OUT)
+
+# Common-anode RGB LED:
+# LOW = ON, HIGH = OFF
+def set_rgb(r: int, g: int, b: int) -> None:
+    GPIO.output(PIN_R, GPIO.LOW if r else GPIO.HIGH)
+    GPIO.output(PIN_G, GPIO.LOW if g else GPIO.HIGH)
+    GPIO.output(PIN_B, GPIO.LOW if b else GPIO.HIGH)
+
+def color_for_glucose(glucose: int) -> str:
+    if glucose < 80:
+        set_rgb(1, 0, 0)      # RED
+        return "RED (LOW)"
+    elif 80 <= glucose <= 120:
+        set_rgb(0, 1, 0)      # GREEN
+        return "GREEN (IDEAL)"
+    elif 120 < glucose <= 180:
+        set_rgb(1, 1, 0)      # YELLOW
+        return "YELLOW (ELEVATED)"
+    else:
+        set_rgb(1, 0, 0)      # RED
+        return "RED (HIGH)"
+
+def fetch_latest_glucose() -> int:
+    r = requests.get(NIGHTSCOUT_URL, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    if not data:
+        raise ValueError("Nightscout returned no entries yet.")
+    return int(data[0]["sgv"])
+
+# ---------- DEMO OVERRIDE ----------
+lock = threading.Lock()
+demo_active_until = 0.0
+demo_value = None
+
+def set_demo(value: int) -> None:
+    global demo_active_until, demo_value
+    with lock:
+        demo_value = value
+        demo_active_until = time.time() + DEMO_SECONDS
+
+def get_active_value(real_value: int):
+    with lock:
+        if time.time() < demo_active_until and demo_value is not None:
+            return demo_value, True
+    return real_value, False
+
+def input_thread():
+    print("\nDemo override: type a glucose value (e.g. 95, 150, 240).")
+    print("Type 'q' to quit.\n")
+    while True:
+        s = input("> ").strip().lower()
+        if s == "q":
+            break
+        if not s:
+            continue
+        try:
+            v = int(s)
+            set_demo(v)
+            print(f"[demo] Using {v} mg/dL for {DEMO_SECONDS} seconds.")
+        except ValueError:
+            print("Please enter an integer or 'q'.")
+
+def main():
+    t = threading.Thread(target=input_thread, daemon=True)
+    t.start()
+
+    last_color = None
+
+    try:
+        while True:
+            try:
+                real = fetch_latest_glucose()
+            except Exception as e:
+                print(f"[error] Nightscout fetch failed: {e}")
+                set_rgb(0, 0, 1)  # BLUE error blink
+                time.sleep(0.2)
+                set_rgb(0, 0, 0)
+                time.sleep(0.8)
+                continue
+
+            value, is_demo = get_active_value(real)
+            color = color_for_glucose(value)
+
+            tag = "demo" if is_demo else "real"
+            if color != last_color:
+                print(f"[{tag}] glucose={value} -> {color}")
+                last_color = color
+
+            time.sleep(POLL_SECONDS)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        set_rgb(0, 0, 0)
+        GPIO.cleanup()
+
+if __name__ == "__main__":
+    main()
+
+
+
+import RPi.GPIO as GPIO
+import time
+
+R = 17
+G = 27
+B = 22
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(R, GPIO.OUT)
+GPIO.setup(G, GPIO.OUT)
+GPIO.setup(B, GPIO.OUT)
+
+def set_rgb(r, g, b):
+    GPIO.output(R, GPIO.LOW if r else GPIO.HIGH)
+    GPIO.output(G, GPIO.LOW if g else GPIO.HIGH)
+    GPIO.output(B, GPIO.LOW if b else GPIO.HIGH)
+
+seq = [
+    ("RED", (1, 0, 0)),
+    ("GREEN", (0, 1, 0)),
+    ("BLUE", (0, 0, 1)),
+    ("YELLOW", (1, 1, 0)),
+    ("WHITE", (1, 1, 1)),
+    ("OFF", (0, 0, 0)),
+]
+
+try:
+    for name, (r, g, b) in seq:
+        print(name)
+        set_rgb(r, g, b)
+        time.sleep(2)
+finally:
+    set_rgb(0, 0, 0)
+    GPIO.cleanup()
+
+
+import RPi.GPIO as GPIO
+import time
+
+PIN = 17
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setup(PIN, GPIO.OUT)
+
+try:
+    while True:
+        GPIO.output(PIN, GPIO.HIGH)
+        time.sleep(1)
+        GPIO.output(PIN, GPIO.LOW)
+        time.sleep(1)
+finally:
+    GPIO.cleanup()
+
+LINK_UP_USERNAME=your_email_here
+LINK_UP_PASSWORD=your_password_here
+LINK_UP_REGION=US
+LINK_UP_TIME_INTERVAL=5
+NIGHTSCOUT_URL=glowabetes.onrender.com
+NIGHTSCOUT_HOST=glowabetes.onrender.com
+NIGHTSCOUT_API_TOKEN=your_sha1_token_here
+
+# Docker Commands for Glowabetes Uploader
+
+## Start
+```bash
+docker run -d --name librelinkup-uploader --env-file libre.env timoschlueter/nightscout-librelink-up:latest
+
+
+docker stop librelinkup-uploader
+
+docker start librelinkup-uploader
+
+docker rm -f librelinkup-uploader
+
+docker rm -f librelinkup-uploader
